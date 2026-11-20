@@ -19,6 +19,32 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfversion"
 )
 
+func withImagePlatform(t *testing.T, img v1.Image, platform v1.Platform) v1.Image {
+	t.Helper()
+	cf, err := img.ConfigFile()
+	if err != nil {
+		t.Fatalf("failed to read image config: %v", err)
+	}
+	cf.OS = platform.OS
+	cf.Architecture = platform.Architecture
+	cf.Variant = platform.Variant
+	cf.OSVersion = platform.OSVersion
+	img, err = mutate.ConfigFile(img, cf)
+	if err != nil {
+		t.Fatalf("failed to set image platform: %v", err)
+	}
+	return img
+}
+
+func platformValue(os, architecture, variant, osVersion string) knownvalue.Check {
+	return knownvalue.ObjectExact(map[string]knownvalue.Check{
+		"os":           knownvalue.StringExact(os),
+		"architecture": knownvalue.StringExact(architecture),
+		"variant":      knownvalue.StringExact(variant),
+		"os_version":   knownvalue.StringExact(osVersion),
+	})
+}
+
 func TestGetFunction(t *testing.T) {
 	repo, cleanup := ocitesting.SetupRepository(t, "test")
 	defer cleanup()
@@ -44,6 +70,7 @@ func TestGetFunction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to mutate image: %v", err)
 	}
+	img = withImagePlatform(t, img, v1.Platform{OS: "linux", Architecture: "arm64", Variant: "v8", OSVersion: "6.12"})
 	now := time.Now()
 	img, err = mutate.CreatedAt(img, v1.Time{Time: now})
 	if err != nil {
@@ -98,7 +125,8 @@ func TestGetFunction(t *testing.T) {
 						"working_dir": knownvalue.StringExact("/tmp"),
 						"created_at":  knownvalue.StringExact(now.Format(time.RFC3339)),
 					}),
-					"images": knownvalue.Null(),
+					"images":    knownvalue.Null(),
+					"platforms": knownvalue.ListExact([]knownvalue.Check{platformValue("linux", "arm64", "v8", "6.12")}),
 				})),
 			},
 		}},
@@ -154,24 +182,14 @@ func TestGetFunction(t *testing.T) {
 						"media_type":     knownvalue.StringExact(string(ggcrtypes.OCIImageIndex)),
 						"manifests": knownvalue.ListExact([]knownvalue.Check{
 							knownvalue.ObjectExact(map[string]knownvalue.Check{
-								"digest": knownvalue.StringRegexp(digestRE),
-								"platform": knownvalue.ObjectExact(map[string]knownvalue.Check{
-									"os":           knownvalue.StringExact("linux"),
-									"architecture": knownvalue.StringExact("amd64"),
-									"variant":      knownvalue.StringExact(""),
-									"os_version":   knownvalue.StringExact(""),
-								}),
+								"digest":     knownvalue.StringRegexp(digestRE),
+								"platform":   platformValue("linux", "amd64", "", ""),
 								"media_type": knownvalue.StringExact(string(ggcrtypes.OCIManifestSchema1)),
 								"size":       knownvalue.NotNull(),
 							}),
 							knownvalue.ObjectExact(map[string]knownvalue.Check{
-								"digest": knownvalue.StringRegexp(digestRE),
-								"platform": knownvalue.ObjectExact(map[string]knownvalue.Check{
-									"os":           knownvalue.StringExact("windows"),
-									"architecture": knownvalue.StringExact("arm64"),
-									"variant":      knownvalue.StringExact("v3"),
-									"os_version":   knownvalue.StringExact("1-rc365"),
-								}),
+								"digest":     knownvalue.StringRegexp(digestRE),
+								"platform":   platformValue("windows", "arm64", "v3", "1-rc365"),
 								"media_type": knownvalue.StringExact(string(ggcrtypes.OCIManifestSchema1)),
 								"size":       knownvalue.NotNull(),
 							}),
@@ -182,6 +200,10 @@ func TestGetFunction(t *testing.T) {
 						"config":      knownvalue.Null(),
 					}),
 					"config": knownvalue.Null(),
+					"platforms": knownvalue.ListExact([]knownvalue.Check{
+						platformValue("linux", "amd64", "", ""),
+						platformValue("windows", "arm64", "v3", "1-rc365"),
+					}),
 					"images": knownvalue.MapExact(map[string]knownvalue.Check{
 						"linux/amd64": knownvalue.ObjectExact(map[string]knownvalue.Check{
 							"digest":    knownvalue.StringRegexp(digestRE),

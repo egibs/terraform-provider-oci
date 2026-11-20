@@ -22,12 +22,13 @@ import (
 )
 
 // pushRandomImage writes a random image to repo:tag and returns its digest.
-func pushRandomImage(t *testing.T, repo name.Repository, tag string) v1.Hash {
+func pushRandomImage(t *testing.T, repo name.Repository, tag string, platform v1.Platform) v1.Hash {
 	t.Helper()
 	img, err := random.Image(1024, 1)
 	if err != nil {
 		t.Fatalf("random.Image: %v", err)
 	}
+	img = withImagePlatform(t, img, platform)
 	if err := remote.Write(repo.Tag(tag), img); err != nil {
 		t.Fatalf("remote.Write: %v", err)
 	}
@@ -43,12 +44,18 @@ func pushRandomImage(t *testing.T, repo name.Repository, tag string) v1.Hash {
 func pushRandomIndex(t *testing.T, repo name.Repository, tag string) v1.Hash {
 	t.Helper()
 	var idx v1.ImageIndex = empty.Index
-	for _, plat := range []v1.Platform{{OS: "linux", Architecture: "amd64"}, {OS: "linux", Architecture: "arm64"}} {
+	for _, plat := range []*v1.Platform{
+		{OS: "linux", Architecture: "amd64"},
+		nil,
+		{OS: "linux"},
+		{Architecture: "amd64"},
+		{OS: "linux", Architecture: "arm64"},
+	} {
 		img, err := random.Image(1024, 1)
 		if err != nil {
 			t.Fatalf("random.Image: %v", err)
 		}
-		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{Add: img, Platform: &plat})
+		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{Add: img, Platform: plat})
 	}
 	if err := remote.WriteIndex(repo.Tag(tag), idx); err != nil {
 		t.Fatalf("remote.WriteIndex: %v", err)
@@ -64,7 +71,8 @@ func TestAccRefDataSource(t *testing.T) {
 	repo, cleanup := ocitesting.SetupRepository(t, "test")
 	defer cleanup()
 
-	imgDigest := pushRandomImage(t, repo, "image")
+	imgDigest := pushRandomImage(t, repo, "image", v1.Platform{OS: "linux", Architecture: "arm64", Variant: "v8"})
+	pushRandomImage(t, repo, "incomplete", v1.Platform{OS: "linux"})
 	idxDigest := pushRandomIndex(t, repo, "index")
 
 	for _, tc := range []struct {
@@ -81,6 +89,15 @@ func TestAccRefDataSource(t *testing.T) {
 			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("tag"), knownvalue.StringExact("image")),
 			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("config"), knownvalue.NotNull()),
 			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("images"), knownvalue.Null()),
+			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("platforms"), knownvalue.ListExact([]knownvalue.Check{
+				platformValue("linux", "arm64", "v8", ""),
+			})),
+		},
+	}, {
+		name: "image without architecture has an empty list",
+		ref:  repo.Tag("incomplete").String(),
+		checks: []statecheck.StateCheck{
+			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("platforms"), knownvalue.ListExact(nil)),
 		},
 	}, {
 		name: "index by tag",
@@ -90,6 +107,12 @@ func TestAccRefDataSource(t *testing.T) {
 			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("tag"), knownvalue.StringExact("index")),
 			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("config"), knownvalue.Null()),
 			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("images").AtMapKey("linux/arm64").AtMapKey("digest"), knownvalue.StringRegexp(digestRE)),
+			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("images").AtMapKey("linux").AtMapKey("digest"), knownvalue.StringRegexp(digestRE)),
+			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("manifest").AtMapKey("manifests").AtSliceIndex(2).AtMapKey("platform"), platformValue("linux", "", "", "")),
+			statecheck.ExpectKnownValue("data.oci_ref.test", tfjsonpath.New("platforms"), knownvalue.ListExact([]knownvalue.Check{
+				platformValue("linux", "amd64", "", ""),
+				platformValue("linux", "arm64", "", ""),
+			})),
 		},
 	}, {
 		name: "image by digest has no tag",
@@ -143,7 +166,8 @@ func TestAccRefDataSource_MatchesGetFunction(t *testing.T) {
 	repo, cleanup := ocitesting.SetupRepository(t, "test")
 	defer cleanup()
 
-	imgDigest := pushRandomImage(t, repo, "image")
+	imgDigest := pushRandomImage(t, repo, "image", v1.Platform{OS: "linux", Architecture: "arm64"})
+	pushRandomImage(t, repo, "incomplete", v1.Platform{Architecture: "arm64"})
 	pushRandomIndex(t, repo, "index")
 
 	for _, tc := range []struct {
@@ -158,6 +182,9 @@ func TestAccRefDataSource_MatchesGetFunction(t *testing.T) {
 	}, {
 		name: "image by digest",
 		ref:  repo.Digest(imgDigest.String()).String(),
+	}, {
+		name: "image without OS",
+		ref:  repo.Tag("incomplete").String(),
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			resource.Test(t, resource.TestCase{
@@ -174,12 +201,13 @@ data "oci_ref" "test" {
 
 output "same" {
   value = provider::oci::get(%[1]q) == {
-    full_ref = data.oci_ref.test.full_ref
-    digest   = data.oci_ref.test.digest
-    tag      = data.oci_ref.test.tag
-    manifest = data.oci_ref.test.manifest
-    images   = data.oci_ref.test.images
-    config   = data.oci_ref.test.config
+    full_ref  = data.oci_ref.test.full_ref
+    digest    = data.oci_ref.test.digest
+    tag       = data.oci_ref.test.tag
+    manifest  = data.oci_ref.test.manifest
+    images    = data.oci_ref.test.images
+    platforms = data.oci_ref.test.platforms
+    config    = data.oci_ref.test.config
   }
 }
 `, tc.ref),
@@ -260,7 +288,7 @@ func TestAccRefDataSource_TagMovesDuringApply(t *testing.T) {
 		err:    regexp.MustCompile(`inconsistent result`),
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			planned := pushRandomImage(t, repo, "moving")
+			planned := pushRandomImage(t, repo, "moving", v1.Platform{})
 			next, err := random.Image(1024, 1)
 			if err != nil {
 				t.Fatalf("random.Image: %v", err)

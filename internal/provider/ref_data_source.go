@@ -16,7 +16,7 @@ import (
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ datasource.DataSourceWithConfigure = (*RefDataSource)(nil)
 
-const refDataSourceMarkdownDesc = `Reads an OCI image or index from a registry. It exposes the same ` + "`full_ref`" + `, ` + "`digest`" + `, ` + "`tag`" + `, ` + "`manifest`" + `, ` + "`images`" + `, and ` + "`config`" + ` values that the ` + "`provider::oci::get`" + ` function returns for the same reference.
+const refDataSourceMarkdownDesc = `Reads an OCI image or index from a registry. It exposes the same ` + "`full_ref`" + `, ` + "`digest`" + `, ` + "`tag`" + `, ` + "`manifest`" + `, ` + "`images`" + `, ` + "`platforms`" + `, and ` + "`config`" + ` values that the ` + "`provider::oci::get`" + ` function returns for the same reference.
 
 Use this data source instead of ` + "`provider::oci::get`" + ` for a tag that can move during a run. Terraform reads a data source once per run, during plan or during apply when ` + "`ref`" + ` is not known until then, and keeps the value it read for the rest of the run. Terraform calls a provider function again during apply and fails the run if the result differs from the one it planned with, which happens when a tag moves between plan and apply. The ` + "`digest`" + ` this data source reports is the one the tag pointed to when Terraform read it.
 
@@ -70,6 +70,11 @@ func (d *RefDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, re
 			"images": schema.MapAttribute{
 				MarkdownDescription: "Map of platform strings to the `digest` and `image_ref` of each platform-specific image. Populated for indexes only.",
 				ElementType:         imageType,
+				Computed:            true,
+			},
+			"platforms": schema.ListAttribute{
+				MarkdownDescription: platformsDescription,
+				ElementType:         platformType,
 				Computed:            true,
 			},
 			"config": schema.ObjectAttribute{

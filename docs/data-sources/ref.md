@@ -3,14 +3,14 @@
 page_title: "oci_ref Data Source - terraform-provider-oci"
 subcategory: ""
 description: |-
-  Reads an OCI image or index from a registry. It exposes the same full_ref, digest, tag, manifest, images, and config values that the provider::oci::get function returns for the same reference.
+  Reads an OCI image or index from a registry. It exposes the same full_ref, digest, tag, manifest, images, platforms, and config values that the provider::oci::get function returns for the same reference.
   Use this data source instead of provider::oci::get for a tag that can move during a run. Terraform reads a data source once per run, during plan or during apply when ref is not known until then, and keeps the value it read for the rest of the run. Terraform calls a provider function again during apply and fails the run if the result differs from the one it planned with, which happens when a tag moves between plan and apply. The digest this data source reports is the one the tag pointed to when Terraform read it.
   The read fails if the reference does not resolve, for example when the tag does not exist.
 ---
 
 # oci_ref (Data Source)
 
-Reads an OCI image or index from a registry. It exposes the same `full_ref`, `digest`, `tag`, `manifest`, `images`, and `config` values that the `provider::oci::get` function returns for the same reference.
+Reads an OCI image or index from a registry. It exposes the same `full_ref`, `digest`, `tag`, `manifest`, `images`, `platforms`, and `config` values that the `provider::oci::get` function returns for the same reference.
 
 Use this data source instead of `provider::oci::get` for a tag that can move during a run. Terraform reads a data source once per run, during plan or during apply when `ref` is not known until then, and keeps the value it read for the rest of the run. Terraform calls a provider function again during apply and fails the run if the result differs from the one it planned with, which happens when a tag moves between plan and apply. The `digest` this data source reports is the one the tag pointed to when Terraform read it.
 
@@ -52,6 +52,7 @@ output "linux_amd64" {
 - `full_ref` (String) The repository of `ref` at `digest` (e.g., `example.com/test@sha256:abcd1234...`).
 - `images` (Map of Object) Map of platform strings to the `digest` and `image_ref` of each platform-specific image. Populated for indexes only. (see [below for nested schema](#nestedatt--images))
 - `manifest` (Object) Manifest of the image or index. (see [below for nested schema](#nestedatt--manifest))
+- `platforms` (List of Object) Platforms declared by the image config or by direct index descriptors in manifest order. Each entry includes `os`, `architecture`, `variant`, and `os_version`. Entries require both OS and architecture. If none qualify, the list is empty. (see [below for nested schema](#nestedatt--platforms))
 - `tag` (String) The tag in `ref`, or empty when `ref` is a digest.
 
 <a id="nestedatt--config"></a>
@@ -167,6 +168,19 @@ Read-Only:
 
 <a id="nestedobjatt--manifest--subject--platform"></a>
 ### Nested Schema for `manifest.subject.platform`
+
+Read-Only:
+
+- `architecture` (String)
+- `os` (String)
+- `os_version` (String)
+- `variant` (String)
+
+
+
+
+<a id="nestedatt--platforms"></a>
+### Nested Schema for `platforms`
 
 Read-Only:
 

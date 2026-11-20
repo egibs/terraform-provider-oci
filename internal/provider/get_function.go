@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/function"
@@ -34,6 +35,7 @@ The function accepts either a tag or digest reference and returns an object with
 - ` + "`images`" + ` - Map of platform strings to image objects (populated for multi-arch indexes). Each image contains:
   - ` + "`digest`" + ` - The platform-specific image digest
   - ` + "`image_ref`" + ` - The full reference for the platform-specific image
+- ` + "`platforms`" + ` - ` + platformsDescription + `
 - ` + "`config`" + ` - The image configuration (populated for single-arch images only). Contains:
   - ` + "`env`" + ` - List of environment variables
   - ` + "`user`" + ` - The user to run as
@@ -82,6 +84,8 @@ output "environment" {
 }
 ` + "```"
 
+const platformsDescription = "Platforms declared by the image config or by direct index descriptors in manifest order. Each entry includes `os`, `architecture`, `variant`, and `os_version`. Entries require both OS and architecture. If none qualify, the list is empty."
+
 func NewGetFunction() function.Function {
 	return &GetFunction{}
 }
@@ -107,12 +111,13 @@ func (s *GetFunction) Definition(_ context.Context, _ function.DefinitionRequest
 		},
 		Return: function.ObjectReturn{
 			AttributeTypes: map[string]attr.Type{
-				"full_ref": basetypes.StringType{},
-				"digest":   basetypes.StringType{},
-				"tag":      basetypes.StringType{},
-				"manifest": basetypes.ObjectType{AttrTypes: manifestAttribute.AttributeTypes},
-				"images":   basetypes.MapType{ElemType: imageType},
-				"config":   basetypes.ObjectType{AttrTypes: configAttribute.AttributeTypes},
+				"full_ref":  basetypes.StringType{},
+				"digest":    basetypes.StringType{},
+				"tag":       basetypes.StringType{},
+				"manifest":  basetypes.ObjectType{AttrTypes: manifestAttribute.AttributeTypes},
+				"images":    basetypes.MapType{ElemType: imageType},
+				"platforms": basetypes.ListType{ElemType: platformType},
+				"config":    basetypes.ObjectType{AttrTypes: configAttribute.AttributeTypes},
 			},
 		},
 	}
@@ -153,12 +158,13 @@ func (s *GetFunction) Run(ctx context.Context, req function.RunRequest, resp *fu
 // reference resolves to, so two reads of one reference differ exactly when
 // the digest does.
 type refInfo struct {
-	FullRef  string           `tfsdk:"full_ref"`
-	Digest   string           `tfsdk:"digest"`
-	Tag      string           `tfsdk:"tag"`
-	Manifest *Manifest        `tfsdk:"manifest"`
-	Images   map[string]Image `tfsdk:"images"`
-	Config   *Config          `tfsdk:"config"`
+	FullRef   string           `tfsdk:"full_ref"`
+	Digest    string           `tfsdk:"digest"`
+	Tag       string           `tfsdk:"tag"`
+	Manifest  *Manifest        `tfsdk:"manifest"`
+	Images    map[string]Image `tfsdk:"images"`
+	Platforms []*Platform      `tfsdk:"platforms"`
+	Config    *Config          `tfsdk:"config"`
 }
 
 // getRef fetches ref from its registry and describes what it resolves to.
@@ -169,9 +175,10 @@ func getRef(ref name.Reference, opts ...remote.Option) (*refInfo, error) {
 	}
 
 	info := &refInfo{
-		FullRef:  ref.Context().Digest(desc.Digest.String()).String(),
-		Digest:   desc.Digest.String(),
-		Manifest: &Manifest{},
+		FullRef:   ref.Context().Digest(desc.Digest.String()).String(),
+		Digest:    desc.Digest.String(),
+		Manifest:  &Manifest{},
+		Platforms: []*Platform{},
 	}
 	if t, ok := ref.(name.Tag); ok {
 		info.Tag = t.TagStr()
@@ -182,9 +189,9 @@ func getRef(ref name.Reference, opts ...remote.Option) (*refInfo, error) {
 
 	switch {
 	case desc.MediaType.IsIndex():
-		info.Images, err = platformImages(ref.Context(), desc)
+		err = info.readIndexPlatforms(ref.Context(), desc)
 	case desc.MediaType.IsImage():
-		info.Config, err = imageConfig(desc)
+		err = info.readImageConfig(desc)
 	}
 	if err != nil {
 		return nil, err
@@ -192,43 +199,50 @@ func getRef(ref name.Reference, opts ...remote.Option) (*refInfo, error) {
 	return info, nil
 }
 
-// platformImages maps each platform in the index desc describes to that
-// platform's image in repo.
-func platformImages(repo name.Repository, desc *remote.Descriptor) (map[string]Image, error) {
+// readIndexPlatforms records the platforms and image references from the index.
+func (info *refInfo) readIndexPlatforms(repo name.Repository, desc *remote.Descriptor) error {
 	idx, err := desc.ImageIndex()
 	if err != nil {
-		return nil, fmt.Errorf("parse index: %w", err)
+		return fmt.Errorf("parse index: %w", err)
 	}
 	imf, err := idx.IndexManifest()
 	if err != nil {
-		return nil, fmt.Errorf("parse index manifest: %w", err)
+		return fmt.Errorf("parse index manifest: %w", err)
 	}
-	images := make(map[string]Image, len(imf.Manifests))
+	info.Images = make(map[string]Image, len(imf.Manifests))
 	for _, m := range imf.Manifests {
 		if m.Platform == nil {
 			continue
 		}
-		images[m.Platform.String()] = Image{
+		info.addPlatform(m.Platform)
+		info.Images[m.Platform.String()] = Image{
 			Digest:   m.Digest.String(),
 			ImageRef: repo.Digest(m.Digest.String()).String(),
 		}
 	}
-	return images, nil
+	return nil
 }
 
-// imageConfig reads the config of the image desc describes.
-func imageConfig(desc *remote.Descriptor) (*Config, error) {
+// readImageConfig records the config and platform of the image.
+func (info *refInfo) readImageConfig(desc *remote.Descriptor) error {
 	img, err := desc.Image()
 	if err != nil {
-		return nil, fmt.Errorf("parse image: %w", err)
+		return fmt.Errorf("parse image: %w", err)
 	}
 	cf, err := img.ConfigFile()
 	if err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		return fmt.Errorf("parse config: %w", err)
 	}
-	cfg := &Config{}
-	cfg.FromConfigFile(cf)
-	return cfg, nil
+	info.Config = &Config{}
+	info.Config.FromConfigFile(cf)
+	info.addPlatform(cf.Platform())
+	return nil
+}
+
+func (info *refInfo) addPlatform(p *v1.Platform) {
+	if p != nil && p.OS != "" && p.Architecture != "" {
+		info.Platforms = append(info.Platforms, ToPlatform(p))
+	}
 }
 
 var imageType = basetypes.ObjectType{
@@ -262,14 +276,16 @@ var descriptorType = basetypes.ObjectType{
 		"media_type": basetypes.StringType{},
 		"size":       basetypes.NumberType{},
 		"digest":     basetypes.StringType{},
-		"platform": basetypes.ObjectType{
-			AttrTypes: map[string]attr.Type{
-				"architecture": basetypes.StringType{},
-				"os":           basetypes.StringType{},
-				"variant":      basetypes.StringType{},
-				"os_version":   basetypes.StringType{},
-			},
-		},
+		"platform":   platformType,
+	},
+}
+
+var platformType = basetypes.ObjectType{
+	AttrTypes: map[string]attr.Type{
+		"architecture": basetypes.StringType{},
+		"os":           basetypes.StringType{},
+		"variant":      basetypes.StringType{},
+		"os_version":   basetypes.StringType{},
 	},
 }
 
